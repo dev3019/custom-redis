@@ -1,3 +1,4 @@
+import { Command, CommandContext } from "../commands";
 import { DEFAULT_DB_COUNT } from "../configs";
 import { Database } from "./database";
 
@@ -34,7 +35,7 @@ export class Engine {
    * Executes a command in a given context.
    * Must be synchronous.
    */
-  // execute(command, context) {
-  //   // dispatch command
-  // }
+  execute(command: Command, context: CommandContext) {
+    // dispatch command
+  }
 }
