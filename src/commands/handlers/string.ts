@@ -26,22 +26,25 @@ export class SetCommand extends Command<
    * - Throw InvalidArgumentError on failure
    */
   parse(rawArgs: unknown[]): SetCommandArgs {
-    const args = rawArgs.map((arg) => {
-      const stringArg = String(arg);
-      if (!stringArg) {
-        errors.push({ detailMsg: `Argument '${stringArg}' is not a valid string`, arg });
-        return "";
-      }
-      return stringArg;
-    });
+    const errors: { argument: string; receivedType: string }[] = [];
+    const [key, value] = rawArgs;
+
+    if (typeof key !== "string") {
+      errors.push({ argument: "key", receivedType: typeof key });
+    }
+    if (typeof value !== "string") {
+      errors.push({ argument: "value", receivedType: typeof value });
+    }
+
     if (errors.length > 0) {
       const error = new InvalidArgumentError("Invalid argument(s) for SET command");
-      error.addDetails(errors)
+      error.addDetails(errors);
       throw error;
     }
+
     return {
-      key: args[0],
-      value: args[1]
+      key,
+      value,
     };
   }
 
@@ -51,7 +54,8 @@ export class SetCommand extends Command<
    * - Preserve TTL (per our design)
    */
   execute(engine: Engine, context: CommandContext, args: SetCommandArgs): "OK" {
-    engine.getDatabase(context.dbIndex).set(args.key, new ValueEntry("string", args.value).);
+    const db = engine.getDatabase(context.dbIndex);
+    db.set(args.key, new ValueEntry("string", args.value));
     return "OK";
   }
 }
