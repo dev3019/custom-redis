@@ -1,7 +1,7 @@
 import { Engine, ValueEntry } from "../../engine";
 import { Command } from "../command";
 import { CommandContext } from "../context";
-import { InvalidArgumentError } from "../errors";
+import { InvalidArgumentError, WrongTypeError } from "../errors";
 
 interface SetCommandArgs {
   key: string;
@@ -43,5 +43,36 @@ export class SetCommand extends Command<
   execute(engine: Engine, context: CommandContext, args: SetCommandArgs): "OK" {
     engine.getDatabase(context.dbIndex).set(args.key, new ValueEntry("string", args.value));
     return "OK";
+  }
+}
+
+interface GetCommandArgs {
+  key: string;
+}
+
+export class GetCommand extends Command<GetCommandArgs, string | null> {
+  readonly name = "GET";
+
+  readonly arity = {
+    min: 1,
+    max: 1,
+  };
+
+  readonly isWrite = false;
+
+  parse(rawArgs: unknown[]): GetCommandArgs {
+    if (typeof rawArgs[0] !== "string") {
+      throw new InvalidArgumentError("Key must be a string", { command: "GET" });
+    }
+    return { key: rawArgs[0] };
+  }
+
+  execute(engine: Engine, context: CommandContext, args: GetCommandArgs): string | null {
+    const entry = engine.getDatabase(context.dbIndex).get(args.key);
+    if (entry === null) return null;
+    if (entry.type !== "string") {
+      throw new WrongTypeError("GET", "string", entry.type);
+    }
+    return entry.value as string;
   }
 }
