@@ -53,3 +53,13 @@ export class InvalidArgumentError extends CommandError {
     super(message, meta);
   }
 }
+
+export class WrongTypeError extends CommandError {
+  constructor(command: string, expectedType: string, actualType: string) {
+    super(
+      "WRONGTYPE Operation against a key holding the wrong kind of value",
+      { command }
+    );
+    this.addDetails({ expectedType, actualType });
+  }
+}

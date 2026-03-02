@@ -1,8 +1,8 @@
 import { describe, test, expect, beforeEach } from "bun:test";
-import { SetCommand } from "./string";
+import { GetCommand, SetCommand } from "./string";
 import { Engine, ValueEntry } from "../../engine";
 import { CommandContext } from "../context";
-import { InvalidArgumentError } from "../errors";
+import { InvalidArgumentError, WrongTypeError } from "../errors";
 
 describe("SetCommand", () => {
   let cmd: SetCommand;
@@ -170,6 +170,172 @@ describe("SetCommand", () => {
       expect(entry.createdAt).toBeLessThanOrEqual(after);
       expect(entry.updatedAt).toBeGreaterThanOrEqual(before);
       expect(entry.updatedAt).toBeLessThanOrEqual(after);
+    });
+  });
+});
+
+describe("GetCommand", () => {
+  let cmd: GetCommand;
+  let setCmd: SetCommand;
+  let engine: Engine;
+  let ctx: CommandContext;
+
+  beforeEach(() => {
+    cmd = new GetCommand();
+    setCmd = new SetCommand();
+    engine = new Engine();
+    ctx = new CommandContext({ dbIndex: 0 });
+  });
+
+  describe("metadata", () => {
+    test("name is GET", () => {
+      expect(cmd.name).toBe("GET");
+    });
+
+    test("arity is min=1, max=1", () => {
+      expect(cmd.arity).toEqual({ min: 1, max: 1 });
+    });
+
+    test("isWrite is false", () => {
+      expect(cmd.isWrite).toBe(false);
+    });
+  });
+
+  describe("parse()", () => {
+    test("returns parsed args for a valid key", () => {
+      const result = cmd.parse(["mykey"]);
+      expect(result).toEqual({ key: "mykey" });
+    });
+
+    test("allows empty string as key", () => {
+      const result = cmd.parse([""]);
+      expect(result).toEqual({ key: "" });
+    });
+
+    test("allows special characters in key", () => {
+      const result = cmd.parse(["key:with:colons and spaces!"]);
+      expect(result).toEqual({ key: "key:with:colons and spaces!" });
+    });
+
+    test("allows very long keys", () => {
+      const longKey = "k".repeat(10_000);
+      const result = cmd.parse([longKey]);
+      expect(result).toEqual({ key: longKey });
+    });
+
+    test("throws InvalidArgumentError when key is a number", () => {
+      expect(() => cmd.parse([123])).toThrow(InvalidArgumentError);
+    });
+
+    test("throws InvalidArgumentError when key is null", () => {
+      expect(() => cmd.parse([null])).toThrow(InvalidArgumentError);
+    });
+
+    test("throws InvalidArgumentError when key is undefined", () => {
+      expect(() => cmd.parse([undefined])).toThrow(InvalidArgumentError);
+    });
+
+    test("throws InvalidArgumentError when key is a boolean", () => {
+      expect(() => cmd.parse([true])).toThrow(InvalidArgumentError);
+    });
+
+    test("throws InvalidArgumentError when key is an object", () => {
+      expect(() => cmd.parse([{}])).toThrow(InvalidArgumentError);
+    });
+
+    test("throws InvalidArgumentError when key is an array", () => {
+      expect(() => cmd.parse([[1, 2]])).toThrow(InvalidArgumentError);
+    });
+
+    test("error includes command meta", () => {
+      try {
+        cmd.parse([123]);
+        throw new Error("Expected InvalidArgumentError");
+      } catch (e) {
+        expect(e).toBeInstanceOf(InvalidArgumentError);
+        expect((e as InvalidArgumentError).meta.command).toBe("GET");
+      }
+    });
+  });
+
+  describe("execute()", () => {
+    test("returns string value for existing key", () => {
+      setCmd.execute(engine, ctx, { key: "k", value: "v" });
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("v");
+    });
+
+    test("returns empty string value when stored value is empty", () => {
+      setCmd.execute(engine, ctx, { key: "k", value: "" });
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("");
+    });
+
+    test("returns null for non-existent key", () => {
+      expect(cmd.execute(engine, ctx, { key: "missing" })).toBeNull();
+    });
+
+    test("returns null for expired key via lazy expiry", () => {
+      const db = engine.getDatabase(0);
+      db.set("k", new ValueEntry("string", "v"));
+      db.setExpiry("k", Date.now() - 1);
+
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBeNull();
+      expect(db.get("k")).toBeNull();
+    });
+
+    test("returns value for a key with unexpired TTL", () => {
+      const db = engine.getDatabase(0);
+      db.set("k", new ValueEntry("string", "v"));
+      db.setExpiry("k", Date.now() + 60_000);
+
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("v");
+      expect(db.isExpired("k")).toBe(false);
+    });
+
+    test("works with non-default database index and keeps DB isolation", () => {
+      const ctx5 = new CommandContext({ dbIndex: 5 });
+      setCmd.execute(engine, ctx5, { key: "k", value: "v5" });
+      setCmd.execute(engine, ctx, { key: "k", value: "v0" });
+
+      expect(cmd.execute(engine, ctx5, { key: "k" })).toBe("v5");
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("v0");
+    });
+
+    test("throws WrongTypeError for non-string stored type", () => {
+      const db = engine.getDatabase(0);
+      db.set("listKey", new ValueEntry("list", ["a", "b"]));
+
+      expect(() => cmd.execute(engine, ctx, { key: "listKey" })).toThrow(WrongTypeError);
+    });
+
+    test("WrongTypeError includes expected/actual type details", () => {
+      const db = engine.getDatabase(0);
+      db.set("setKey", new ValueEntry("set", new Set(["a"])));
+
+      try {
+        cmd.execute(engine, ctx, { key: "setKey" });
+        throw new Error("Expected WrongTypeError");
+      } catch (e) {
+        expect(e).toBeInstanceOf(WrongTypeError);
+        const err = e as WrongTypeError;
+        expect(err.message).toBe(
+          "WRONGTYPE Operation against a key holding the wrong kind of value"
+        );
+        expect(err.meta.command).toBe("GET");
+        expect(err.details).toContainEqual({ expectedType: "string", actualType: "set" });
+      }
+    });
+
+    test("returns latest value after overwrites", () => {
+      setCmd.execute(engine, ctx, { key: "k", value: "v1" });
+      setCmd.execute(engine, ctx, { key: "k", value: "v2" });
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("v2");
+    });
+
+    test("repeated GET calls are idempotent", () => {
+      setCmd.execute(engine, ctx, { key: "k", value: "stable" });
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("stable");
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("stable");
+      expect(cmd.execute(engine, ctx, { key: "k" })).toBe("stable");
     });
   });
 });
