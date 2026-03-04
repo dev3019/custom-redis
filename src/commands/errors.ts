@@ -1,11 +1,11 @@
-type Meta = {
+export type Meta = {
   command?: string;
   dbIndex?: number;
   clientId?: string;
   argsCount?: number;
 }
 
-type Detail = string | { [key: string]: string | number | boolean };
+export type Detail = string | { [key: string]: string | number | boolean };
 
 export class CommandError extends Error {
   readonly details: Detail[] = [];
@@ -61,5 +61,11 @@ export class WrongTypeError extends CommandError {
       { command }
     );
     this.addDetails({ expectedType, actualType });
+  }
+}
+
+export class DuplicateCommandError extends CommandError {
+  constructor(command: string) {
+    super(`Command '${command}' is already registered`, { command });
   }
 }

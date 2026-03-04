@@ -1,5 +1,5 @@
 import { Command } from "./command";
-import { CommandError } from "./errors";
+import { DuplicateCommandError } from "./errors";
 
 export class CommandRegistry {
   /**
@@ -13,7 +13,7 @@ export class CommandRegistry {
    */
   register(command: Command): void {
     const commandName = command.name.toUpperCase();
-    if (this.commands.has(commandName)) throw new CommandError(`Command '${commandName}' is already registered`);
+    if (this.commands.has(commandName)) throw new DuplicateCommandError(commandName);
     this.commands.set(commandName, command);
   }
 

@@ -1,6 +1,6 @@
-import { Command, CommandContext } from "../commands";
 import { DEFAULT_DB_COUNT } from "../configs";
 import { Database } from "./database";
+import { DatabaseIndexOutOfRangeError } from "./errors";
 
 export class Engine {
   /**
@@ -12,13 +12,11 @@ export class Engine {
   readonly dbCount: number;
 
   constructor(dbCount: number = DEFAULT_DB_COUNT) {
-    // initialize databases
     this.dbCount = dbCount;
     this.databases = Array.from(
       { length: this.dbCount },
       () => new Database()
     );
-
   }
 
   /**
@@ -26,16 +24,9 @@ export class Engine {
    * Must throw if index is invalid.
    */
   getDatabase(index: number): Database {
-    // return Database
-    if (index < 0 || index >= this.dbCount) throw new Error('Database index out of range');
+    if (index < 0 || index >= this.dbCount) {
+      throw new DatabaseIndexOutOfRangeError(index, this.dbCount);
+    }
     return this.databases[index];
-  }
-
-  /**
-   * Executes a command in a given context.
-   * Must be synchronous.
-   */
-  execute(command: Command, context: CommandContext) {
-    // dispatch command
   }
 }

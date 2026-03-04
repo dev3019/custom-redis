@@ -73,7 +73,7 @@ classDiagram
 | Method | Signature | Behavior |
 |---|---|---|
 | `constructor` | `(dbCount?: number)` | Creates `dbCount` (default 16) Database instances. |
-| `getDatabase` | `(index: number): Database` | Returns the Database at `index`. Throws if index is out of range `[0, dbCount)`. |
+| `getDatabase` | `(index: number): Database` | Returns the Database at `index`. Throws `DatabaseIndexOutOfRangeError` if index is out of range `[0, dbCount)`. |
 
 **Invariants:**
 - `databases` array is private and never exposed directly.
@@ -142,7 +142,7 @@ classDiagram
 
 | Method | Signature | Behavior |
 |---|---|---|
-| `register` | `(command: Command): void` | Registers command by uppercase name. Throws on duplicate. |
+| `register` | `(command: Command): void` | Registers command by uppercase name. Throws `DuplicateCommandError` on duplicate. |
 | `get` | `(name: string): Command \| null` | Resolves command by uppercase name. Returns `null` if not found. |
 | `list` | `(): Command[]` | Returns all registered commands (for introspection). |
 
@@ -221,16 +221,17 @@ classDiagram
 
 **Parse:**
 1. Validate `rawArgs[0]` (key) is a string. Throw `InvalidArgumentError` if not.
-2. Validate `rawArgs[1]` (seconds) is a positive integer. Throw `InvalidArgumentError` if not (no zero, no negative, no float).
+2. Validate `rawArgs[1]` (seconds) is an integer. Throw `InvalidArgumentError` if not (no float, no NaN, no Infinity).
 3. Return `{ key: string, seconds: number }`.
 
 **Execute:**
 1. Get the database: `engine.getDatabase(context.dbIndex)`.
 2. Call `db.get(args.key)` to check existence (also triggers lazy expiry).
 3. If the key does not exist, return `0`.
-4. Compute absolute timestamp: `Date.now() + args.seconds * 1000`.
-5. Call `db.setExpiry(args.key, timestamp)`.
-6. Return `1`.
+4. If `args.seconds <= 0`, delete the key immediately and return `1` (Redis-compatible immediate expiry).
+5. Otherwise compute absolute timestamp: `Date.now() + args.seconds * 1000`.
+6. Call `db.setExpiry(args.key, timestamp)`.
+7. Return `1`.
 
 ---
 
@@ -261,10 +262,15 @@ classDiagram
         +constructor(command, expectedType, actualType)
     }
 
+    class DuplicateCommandError {
+        +constructor(command)
+    }
+
     CommandError <|-- UnknownCommandError
     CommandError <|-- ArityError
     CommandError <|-- InvalidArgumentError
     CommandError <|-- WrongTypeError
+    CommandError <|-- DuplicateCommandError
 ```
 
 ### Error Types
@@ -275,6 +281,7 @@ classDiagram
 | `ArityError` | Argument count outside `[min, max]` | `SET key` (missing value) |
 | `InvalidArgumentError` | Argument fails parse validation | `EXPIRE key "abc"` (not an integer) |
 | `WrongTypeError` (new) | Operation on wrong data type | `GET` on a key holding a list |
+| `DuplicateCommandError` | Command registration duplicates an existing name | Registering `SET` twice |
 
 ### Meta Type
 
@@ -287,7 +294,15 @@ type Meta = {
 }
 ```
 
-All errors are deterministic, carry no heavy payloads, and use `Object.freeze` on meta to prevent mutation.
+`ArityError` also attaches deterministic details payload `{ min, max, actual }`.
+
+All command errors are deterministic, carry no heavy payloads, and use `Object.freeze` on meta/details objects to prevent mutation.
+
+### Engine Error Types
+
+| Error | When Thrown | Example |
+|---|---|---|
+| `DatabaseIndexOutOfRangeError` | Database index is outside `[0, dbCount)` | `engine.getDatabase(-1)` |
 
 ---
 
@@ -461,11 +476,11 @@ sequenceDiagram
 
 ---
 
-## 8. New Type to Add — WrongTypeError
+## 8. Error Types Added in Phase 1
 
-A new error class is needed for Phase 1 to handle type mismatches (e.g. `GET` on a list key).
+Phase 1 adds explicit typed errors for command and engine layers.
 
-**File:** `src/commands/errors.ts`
+**Command errors file:** `src/commands/errors.ts`
 
 ```typescript
 export class WrongTypeError extends CommandError {
@@ -479,7 +494,29 @@ export class WrongTypeError extends CommandError {
 }
 ```
 
-This follows the Redis error format: `WRONGTYPE Operation against a key holding the wrong kind of value`.
+```typescript
+export class DuplicateCommandError extends CommandError {
+  constructor(command: string) {
+    super(`Command '${command}' is already registered`, { command });
+  }
+}
+```
+
+**Engine errors file:** `src/engine/errors.ts`
+
+```typescript
+export class DatabaseIndexOutOfRangeError extends EngineError {
+  constructor(index: number, dbCount: number) {
+    super(`Database index out of range: ${index}. Expected 0..${dbCount - 1}`, {
+      dbIndex: index,
+      minDbIndex: 0,
+      maxDbIndex: dbCount - 1,
+    });
+  }
+}
+```
+
+`WrongTypeError` follows the Redis error format: `WRONGTYPE Operation against a key holding the wrong kind of value`.
 
 ---
 
@@ -491,6 +528,7 @@ src/
 │   ├── engine.ts          (exists)
 │   ├── database.ts        (exists)
 │   ├── valueEntry.ts      (exists)
+│   ├── errors.ts          (new — EngineError, DatabaseIndexOutOfRangeError)
 │   └── index.ts           (exists)
 │
 ├── commands/
@@ -498,7 +536,7 @@ src/
 │   ├── context.ts          (exists)
 │   ├── dispatcher.ts       (exists)
 │   ├── registry.ts         (exists)
-│   ├── errors.ts           (exists — add WrongTypeError)
+│   ├── errors.ts           (exists — CommandError hierarchy incl. WrongTypeError & DuplicateCommandError)
 │   └── handlers/
 │       ├── string.ts       (new — SET, GET)
 │       └── ttl.ts          (new — EXPIRE)

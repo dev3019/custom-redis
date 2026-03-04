@@ -32,7 +32,11 @@ export class CommandDispatcher {
 
     // Arity check
     if (rawArgs.length < command.arity.min || rawArgs.length > command.arity.max) {
-      throw new ArityError(commandName);
+      throw new ArityError(commandName, {
+        min: command.arity.min,
+        max: command.arity.max,
+        actual: rawArgs.length,
+      });
     }
 
     // Argument parsing
