@@ -5,8 +5,8 @@ export class Database {
    * Stores keys & values
    * Enforces TTL lazily
    */
-  private keyspace = new Map<string, ValueEntry>();
-  private expirations = new Map<string, number>();
+  private readonly keyspace = new Map<string, ValueEntry>();
+  private readonly expirations = new Map<string, number>();
 
   /**
    * Returns value or null
@@ -14,25 +14,25 @@ export class Database {
    */
   get(key: string): ValueEntry | null {
     // lazy expiry check
-    if (this.isExpired(key)){
+    if (this.isExpired(key)) {
       this.delete(key);
       return null;
     }
-    return this.keyspace.get(key) || null;
+    return this.keyspace.get(key) ?? null;
   }
 
   /**
    * Overwrites existing key
    * Must NOT manage TTL unless instructed
    */
-  set(key: string, entry: ValueEntry) {
+  set(key: string, entry: ValueEntry): void {
     this.keyspace.set(key, entry);
   }
 
   /**
    * Deletes key & TTL metadata
    */
-  delete(key: string) {
+  delete(key: string): void {
     this.keyspace.delete(key);
     this.expirations.delete(key);
   }
@@ -41,7 +41,7 @@ export class Database {
    * Sets expiry timestamp
    * Must do nothing if key does not exist
    */
-  setExpiry(key: string, timestampMs: number) {
+  setExpiry(key: string, timestampMs: number): void {
     if (!this.keyspace.has(key)) return;
     this.expirations.set(key, timestampMs);
   }

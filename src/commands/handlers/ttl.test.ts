@@ -127,6 +127,14 @@ describe("ExpireCommand", () => {
       test("throws InvalidArgumentError when seconds is Infinity", () => {
         expect(() => cmd.parse(["k", Infinity])).toThrow(InvalidArgumentError);
       });
+
+      test("throws InvalidArgumentError when seconds is -Infinity", () => {
+        expect(() => cmd.parse(["k", -Infinity])).toThrow(InvalidArgumentError);
+      });
+
+      test("throws InvalidArgumentError when seconds is a Number object", () => {
+        expect(() => cmd.parse(["k", new Number(60)])).toThrow(InvalidArgumentError);
+      });
     });
 
     test("error includes command meta", () => {
@@ -210,6 +218,19 @@ describe("ExpireCommand", () => {
 
         expect(cmd.execute(engine, ctx, { key: "k", seconds: 60 })).toBe(0);
       });
+
+      test("supports context.withDatabase() without mutating the original context", () => {
+        engine.getDatabase(1).set("k", new ValueEntry("string", "v1"));
+        engine.getDatabase(0).set("k", new ValueEntry("string", "v0"));
+
+        const db1Context = ctx.withDatabase(1);
+        expect(ctx.dbIndex).toBe(0);
+        expect(db1Context.dbIndex).toBe(1);
+
+        expect(cmd.execute(engine, db1Context, { key: "k", seconds: 0 })).toBe(1);
+        expect(engine.getDatabase(1).get("k")).toBeNull();
+        expect(engine.getDatabase(0).get("k")!.value).toBe("v0");
+      });
     });
 
     describe("zero and negative seconds", () => {
@@ -269,6 +290,20 @@ describe("ExpireCommand", () => {
         cmd.execute(engine, ctx, { key: "k", seconds: 99999 });
 
         expect(db.get("k")).not.toBeNull();
+        expect(db.isExpired("k")).toBe(false);
+      });
+
+      test("expired key is lazily deleted and EXPIRE on re-inserted key works normally", () => {
+        const db = engine.getDatabase(0);
+        db.set("k", new ValueEntry("string", "v1"));
+        db.setExpiry("k", Date.now() - 1_000);
+
+        // Touch the key to trigger lazy delete.
+        expect(db.get("k")).toBeNull();
+
+        db.set("k", new ValueEntry("string", "v2"));
+        expect(cmd.execute(engine, ctx, { key: "k", seconds: 60 })).toBe(1);
+        expect(db.get("k")!.value).toBe("v2");
         expect(db.isExpired("k")).toBe(false);
       });
     });

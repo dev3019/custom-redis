@@ -344,6 +344,18 @@ describe("GetCommand", () => {
         const result = cmd.execute(engine, ctx, { key: "k" });
         expect(result).toBe("v");
       });
+
+      test("lazy delete clears stale TTL metadata for a re-inserted key", () => {
+        const db = engine.getDatabase(0);
+
+        db.set("k", new ValueEntry("string", "v1"));
+        db.setExpiry("k", Date.now() - 1_000);
+        expect(cmd.execute(engine, ctx, { key: "k" })).toBeNull();
+
+        db.set("k", new ValueEntry("string", "v2"));
+        expect(cmd.execute(engine, ctx, { key: "k" })).toBe("v2");
+        expect(db.isExpired("k")).toBe(false);
+      });
     });
 
     describe("interaction with SET", () => {
@@ -360,6 +372,17 @@ describe("GetCommand", () => {
         set.execute(engine, ctx, { key: "k", value: "second" });
         const result = cmd.execute(engine, ctx, { key: "k" });
         expect(result).toBe("second");
+      });
+
+      test("GET respects context.withDatabase() and keeps database isolation", () => {
+        const set = new SetCommand();
+        const ctx1 = ctx.withDatabase(1);
+
+        set.execute(engine, ctx, { key: "k", value: "db0" });
+        set.execute(engine, ctx1, { key: "k", value: "db1" });
+
+        expect(cmd.execute(engine, ctx, { key: "k" })).toBe("db0");
+        expect(cmd.execute(engine, ctx1, { key: "k" })).toBe("db1");
       });
     });
   });

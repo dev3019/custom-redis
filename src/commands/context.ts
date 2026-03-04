@@ -25,7 +25,7 @@ export class CommandContext {
    */
   withDatabase(dbIndex: number): CommandContext {
     return new CommandContext({
-      ...this,
+      clientId: this.clientId,
       dbIndex,
     });
   }
