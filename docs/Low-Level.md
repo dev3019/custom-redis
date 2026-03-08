@@ -4,6 +4,19 @@
 
 ```mermaid
 classDiagram
+    class MiniRedis {
+        -engine: Engine
+        -dispatcher: CommandDispatcher
+        -context: CommandContext
+        -server: TCPServer or null
+        +set(key, value): string
+        +get(key): string or null
+        +expire(key, seconds): 1 or 0
+        +select(dbIndex): void
+        +listen(port): void
+        +close(): void
+    }
+
     class Engine {
         -databases: Database[]
         +dbCount: number
@@ -55,6 +68,32 @@ classDiagram
         +withDatabase(dbIndex): CommandContext
     }
 
+    class RESPEncoder {
+        +encode(value): Buffer
+    }
+
+    class RESPDecoder {
+        +decode(buffer): string[][]
+    }
+
+    class TCPServer {
+        -port: number
+        -dispatcher: CommandDispatcher
+        +start(): void
+        +stop(): void
+    }
+
+    class ClientConnection {
+        -socket: Socket
+        -context: CommandContext
+        -decoder: RESPDecoder
+        -encoder: RESPEncoder
+        +handle(data): void
+    }
+
+    MiniRedis --> Engine
+    MiniRedis --> CommandDispatcher
+    MiniRedis ..> TCPServer : "optional (server mode)"
     Engine "1" --> "0..15" Database
     Database --> ValueEntry
     CommandDispatcher --> Engine
@@ -62,6 +101,11 @@ classDiagram
     CommandRegistry --> Command
     Command ..> Engine
     Command ..> CommandContext
+    TCPServer --> CommandDispatcher
+    TCPServer --> ClientConnection
+    ClientConnection --> RESPDecoder
+    ClientConnection --> RESPEncoder
+    ClientConnection --> CommandDispatcher
 ```
 
 ---
@@ -156,6 +200,146 @@ classDiagram
 | Method | Signature | Behavior |
 |---|---|---|
 | `withDatabase` | `(dbIndex: number): CommandContext` | Returns a new `CommandContext` with updated `dbIndex`. Immutable pattern. |
+
+### 2.8 MiniRedis — Public Facade (`src/client/miniRedis.ts`) — Phase 2A
+
+The consumer-facing class. Owns the engine and dispatcher internally. Provides a fluent, type-safe API.
+
+| Member | Type | Description |
+|---|---|---|
+| `engine` (private) | `Engine` | The in-memory engine instance |
+| `dispatcher` (private) | `CommandDispatcher` | Pre-configured dispatcher with all commands registered |
+| `context` (private, mutable) | `CommandContext` | Tracks the active database index |
+| `server` (private) | `TCPServer \| null` | TCP server instance, `null` until `.listen()` is called |
+
+| Method | Signature | Behavior |
+|---|---|---|
+| `constructor` | `(options?: MiniRedisOptions)` | Creates engine, registers all commands, initializes dispatcher. Accepts optional config (e.g. `dbCount`). |
+| `set` | `(key: string, value: string): string` | Dispatches `SET` command. Returns `"OK"`. |
+| `get` | `(key: string): string \| null` | Dispatches `GET` command. Returns value or `null`. |
+| `expire` | `(key: string, seconds: number): 1 \| 0` | Dispatches `EXPIRE` command. Returns `1` if TTL was set, `0` if key doesn't exist. |
+| `select` | `(dbIndex: number): void` | Updates internal `context` to point to the specified database. Validates index bounds. |
+| `listen` | `(port: number): void` | Starts TCP server on the given port (Phase 2C). Same engine, same data. |
+| `close` | `(): void` | Stops the TCP server if running. |
+
+**Invariants:**
+- `MiniRedis` is the only public export. Consumers never import `Engine`, `CommandDispatcher`, or `Database` directly.
+- Each fluent method maps 1:1 to a registered command via `dispatcher.dispatch()`.
+- Adding a new command to MiniRedis requires: (1) implement the `Command` subclass, (2) register it, (3) add a typed method to `MiniRedis`. Two touch points.
+- `context` is mutable only via `.select()`. The `dbIndex` defaults to `0`.
+
+**Options type:**
+
+```typescript
+type MiniRedisOptions = {
+  dbCount?: number;  // default: 16
+}
+```
+
+**Internal wiring (pseudocode):**
+
+```typescript
+class MiniRedis {
+  private engine: Engine;
+  private dispatcher: CommandDispatcher;
+  private context: CommandContext;
+
+  constructor(options?: MiniRedisOptions) {
+    this.engine = new Engine(options?.dbCount);
+    const registry = new CommandRegistry();
+    // register all commands
+    registry.register(new SetCommand());
+    registry.register(new GetCommand());
+    registry.register(new ExpireCommand());
+    this.dispatcher = new CommandDispatcher(this.engine, registry);
+    this.context = new CommandContext(0);
+  }
+
+  set(key: string, value: string): string {
+    return this.dispatcher.dispatch("SET", [key, value], this.context) as string;
+  }
+
+  get(key: string): string | null {
+    return this.dispatcher.dispatch("GET", [key], this.context) as string | null;
+  }
+
+  expire(key: string, seconds: number): 1 | 0 {
+    return this.dispatcher.dispatch("EXPIRE", [key, String(seconds)], this.context) as 1 | 0;
+  }
+
+  select(dbIndex: number): void {
+    this.context = this.context.withDatabase(dbIndex);
+  }
+}
+```
+
+### 2.9 RESP Encoder/Decoder (`src/protocol/resp.ts`) — Phase 2B
+
+RESP (REdis Serialization Protocol) is the binary-safe wire format for Redis client-server communication.
+
+**RESP Data Types:**
+
+| Prefix | Type | Example |
+|---|---|---|
+| `+` | Simple String | `+OK\r\n` |
+| `-` | Error | `-ERR unknown command\r\n` |
+| `:` | Integer | `:1\r\n` |
+| `$` | Bulk String | `$3\r\nbar\r\n` |
+| `$-1` | Null Bulk String | `$-1\r\n` |
+| `*` | Array | `*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n` |
+
+**RESPDecoder:**
+
+| Method | Signature | Behavior |
+|---|---|---|
+| `decode` | `(buffer: Buffer): string[][]` | Parses raw bytes into an array of command arrays. Handles pipelining (multiple commands in one buffer). |
+
+**RESPEncoder:**
+
+| Method | Signature | Behavior |
+|---|---|---|
+| `encodeSimpleString` | `(value: string): Buffer` | Encodes `+{value}\r\n` |
+| `encodeError` | `(message: string): Buffer` | Encodes `-{message}\r\n` |
+| `encodeInteger` | `(value: number): Buffer` | Encodes `:{value}\r\n` |
+| `encodeBulkString` | `(value: string \| null): Buffer` | Encodes `${len}\r\n{value}\r\n` or `$-1\r\n` for null |
+| `encode` | `(value: unknown): Buffer` | Auto-detects type and delegates to the appropriate encoder |
+
+**Dependency decision:** Use `redis-parser` npm package for decoding (battle-tested, handles edge cases like partial reads and pipelining) or hand-roll a simpler decoder if the project's educational goal requires it.
+
+### 2.10 TCPServer (`src/server/tcp.ts`) — Phase 2C
+
+| Member | Type | Description |
+|---|---|---|
+| `port` (private) | `number` | Port to listen on |
+| `dispatcher` (private) | `CommandDispatcher` | Shared dispatcher instance (same one MiniRedis uses) |
+| `engine` (private) | `Engine` | Shared engine instance |
+| `listener` (private) | `Server \| null` | Bun TCP server handle |
+
+| Method | Signature | Behavior |
+|---|---|---|
+| `start` | `(): void` | Calls `Bun.listen()` on the configured port. Creates a `ClientConnection` per incoming socket. |
+| `stop` | `(): void` | Closes all active connections and stops the listener. |
+
+### 2.11 ClientConnection (`src/server/connection.ts`) — Phase 2C
+
+Manages a single TCP client session.
+
+| Member | Type | Description |
+|---|---|---|
+| `socket` (private) | `Socket` | The raw TCP socket |
+| `context` (private) | `CommandContext` | Per-client context (tracks selected database, client ID) |
+| `decoder` (private) | `RESPDecoder` | Decodes incoming bytes |
+| `encoder` (private) | `RESPEncoder` | Encodes outgoing responses |
+| `dispatcher` (private) | `CommandDispatcher` | Shared dispatcher |
+
+| Method | Signature | Behavior |
+|---|---|---|
+| `handle` | `(data: Buffer): void` | Decodes RESP → extracts command name + args → dispatches → encodes result → writes to socket |
+
+**Per-client state:**
+- Each connection has its own `CommandContext` with a unique `clientId` and independent `dbIndex` (starts at 0).
+- `SELECT` commands update only that connection's context.
+- All connections share the same `Engine` instance — reads/writes to the same keyspace.
 
 ---
 
@@ -520,30 +704,130 @@ export class DatabaseIndexOutOfRangeError extends EngineError {
 
 ---
 
-## 9. File Structure After Phase 1 Implementation
+## 9. File Structure (Current + Planned)
 
 ```
 src/
-├── engine/
-│   ├── engine.ts          (exists)
-│   ├── database.ts        (exists)
-│   ├── valueEntry.ts      (exists)
-│   ├── errors.ts          (new — EngineError, DatabaseIndexOutOfRangeError)
-│   └── index.ts           (exists)
+├── engine/                  (Phase 1 — implemented)
+│   ├── engine.ts
+│   ├── database.ts
+│   ├── valueEntry.ts
+│   ├── errors.ts
+│   └── index.ts
 │
-├── commands/
-│   ├── command.ts          (exists)
-│   ├── context.ts          (exists)
-│   ├── dispatcher.ts       (exists)
-│   ├── registry.ts         (exists)
-│   ├── errors.ts           (exists — CommandError hierarchy incl. WrongTypeError & DuplicateCommandError)
+├── commands/                (Phase 1 — implemented)
+│   ├── command.ts
+│   ├── context.ts
+│   ├── dispatcher.ts
+│   ├── registry.ts
+│   ├── errors.ts
+│   ├── index.ts
 │   └── handlers/
-│       ├── string.ts       (new — SET, GET)
-│       └── ttl.ts          (new — EXPIRE)
+│       ├── string.ts
+│       └── ttl.ts
 │
-├── configs/
-│   ├── defaults.ts         (exists)
-│   └── index.ts            (exists)
+├── configs/                 (Phase 1 — implemented)
+│   ├── defaults.ts
+│   └── index.ts
 │
-└── index.ts                (new — entry point)
+├── client/                  (Phase 2A — next)
+│   ├── miniRedis.ts         MiniRedis facade class
+│   └── index.ts             barrel export
+│
+├── protocol/                (Phase 2B — deferred)
+│   └── resp.ts              RESP encoder/decoder
+│
+├── server/                  (Phase 2C — deferred)
+│   ├── tcp.ts               Bun.listen TCP server
+│   └── connection.ts        per-client session handler
+│
+└── index.ts                 (Phase 2A — re-exports MiniRedis)
+```
+
+---
+
+## 10. Sequence Diagrams — Phase 2
+
+### 10.1 Embedded Mode — `redis.set("foo", "bar")`
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant MR as MiniRedis
+    participant D as Dispatcher
+    participant R as Registry
+    participant Cmd as SetCommand
+    participant E as Engine
+    participant DB as Database
+
+    App->>MR: redis.set("foo", "bar")
+    MR->>D: dispatch("SET", ["foo","bar"], ctx)
+    D->>R: get("SET")
+    R-->>D: SetCommand
+    D->>D: arity check
+    D->>Cmd: parse(["foo","bar"])
+    Cmd-->>D: parsed args
+    D->>Cmd: execute(engine, ctx, args)
+    Cmd->>E: getDatabase(0)
+    E-->>Cmd: Database
+    Cmd->>DB: set("foo", ValueEntry("string","bar"))
+    Cmd-->>D: "OK"
+    D-->>MR: "OK"
+    MR-->>App: "OK"
+```
+
+### 10.2 Server Mode — Remote Client `SET foo bar`
+
+```mermaid
+sequenceDiagram
+    participant RC as Redis Client
+    participant TCP as TCP Server
+    participant Conn as ClientConnection
+    participant RESP as RESP Decoder
+    participant D as Dispatcher
+    participant E as Engine
+    participant DB as Database
+    participant Enc as RESP Encoder
+
+    RC->>TCP: *3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n
+    TCP->>Conn: handle(data)
+    Conn->>RESP: decode(buffer)
+    RESP-->>Conn: ["SET", "foo", "bar"]
+    Conn->>D: dispatch("SET", ["foo","bar"], clientCtx)
+    D->>E: (same pipeline as embedded)
+    E->>DB: set("foo", ValueEntry("string","bar"))
+    DB-->>E: void
+    E-->>D: "OK"
+    D-->>Conn: "OK"
+    Conn->>Enc: encodeSimpleString("OK")
+    Enc-->>Conn: +OK\r\n
+    Conn->>RC: +OK\r\n
+```
+
+### 10.3 Mixed Mode — Embedded + Remote on Same Engine
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant MR as MiniRedis
+    participant RC as redis-cli
+    participant TCP as TCP Server
+    participant D as Dispatcher
+    participant DB as Database
+
+    App->>MR: redis.set("foo", "bar")
+    MR->>D: dispatch("SET", ...)
+    D->>DB: set("foo", ...)
+    DB-->>D: void
+    D-->>MR: "OK"
+    MR-->>App: "OK"
+
+    Note over App,MR: redis.listen(6379)
+
+    RC->>TCP: GET foo (via RESP)
+    TCP->>D: dispatch("GET", ["foo"], clientCtx)
+    D->>DB: get("foo")
+    DB-->>D: ValueEntry("string","bar")
+    D-->>TCP: "bar"
+    TCP->>RC: $3\r\nbar\r\n
 ```
